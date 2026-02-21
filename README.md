@@ -38,8 +38,81 @@ This part implements the relational schema for the Dynamic Basin Monitoring plat
 
 ---
 
+
+
+
+
+
+
+## Part B — Data Ingestion Pipeline (management command)
+
+### Overview
+A management command ingests hourly CSV files (Rainfall / Temperature) into the Django `Observation` table, handling duplicates idempotently and logging errors.  
+Command path: `monitoring/management/commands/ingest_observations.py`.
+
+Key goals:
+- Support both CSV header shapes used in the dataset (e.g. `Datetime,Value,Basin.ID` and `datetime,value,basin`).
+- Idempotent ingestion (re-running the same file will not create duplicates).
+- Graceful error logging for invalid datetime, missing basin_id, non-numeric values, unknown data types.
+- Fast bulk upsert using batched multi-row `INSERT ... ON DUPLICATE KEY UPDATE` (tuned by `--batch-size`).
+
+---
+
+### Features
+- Accepts `--data-type` CLI argument (e.g., `Rainfall` or `Temperature`) or infers data type from CSV filename or CSV column.
+- Deterministic `source` for idempotency: `filename::sha1prefix` (so same file re-run updates existing rows).
+- Cached `Basin` lookups and automatic `Basin` creation on first encounter.
+- Batch upsert to the DB for high performance (default `BATCH_SIZE = 2000`).
+- Detailed per-run logfile written to `logs/ingest_observations_<timestamp>.log`.
+
+---
+
+### Files committed
+- `monitoring/management/commands/ingest_observations.py` — main ingestion command
+- `logs/` — (recommended) include a trimmed sample logfile showing success/errors (optional)
+- `README.md` — this documentation
+
+---
+
+### Usage
+
+1. Place CSV(s) at the project root `data/` folder (same level as `manage.py`):
+
+
+dynamic_maps/
+├─ manage.py
+├─ monitoring/
+├─ data/
+│ ├─ january_data_temp.csv
+│ └─ january_data_rain.csv
+└─ logs/
+
+
+2. Ensure `DataType` rows exist in DB (one-time):
+
+```bash
+python manage.py shell
+>>> from monitoring.models import DataType
+>>> DataType.objects.get_or_create(name='Rainfall')
+>>> DataType.objects.get_or_create(name='Temperature')
+>>> exit()
+
+
+
+# Temperature
+python manage.py ingest_observations data/january_data_temp.csv --data-type Temperature
+
+# Rainfall
+python manage.py ingest_observations data/january_data_rain.csv --data-type Rainfall
+
+
+
+
+
+
 ## How to run (quick)
 1. Configure MySQL in `dynamic_maps/settings.py`.  
 2. Install dependencies and activate venv:
    ```bash
    pip install -r requirements.txt
+
