@@ -221,6 +221,18 @@ DELETE /api/observations/{id}/
 
 
 
+- Analytics:
+  - Basin timeseries (last 24h or custom window)
+    GET /api/basins/{id}/timeseries?data_type=Temperature&window=24h
+
+  - Upstream rainfall aggregation
+    GET /api/basins/{id}/upstream_aggregate?data_type=Rainfall&window=24h&depth=1
+
+
+
+
+
+
 ## How to run (quick)
 1. Configure MySQL in `dynamic_maps/settings.py`.  
 2. Install dependencies and activate venv:

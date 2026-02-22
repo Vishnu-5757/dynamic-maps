@@ -1,0 +1,321 @@
+<!-- templates/monitoring/dashboard_ajax.html -->
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Monitoring Dashboard — Dynamic Maps</title>
+
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+
+  <style>
+    :root{--primary:#0d6efd;--accent:#6610f2;--muted:#6c757d}
+    body{background:#f6f8fb;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;color:#0b1726}
+    .topbar{background:linear-gradient(90deg,var(--primary),var(--accent));color:white;padding:14px 20px;border-radius:0 0 12px 12px}
+    .card-ui{border-radius:12px;background:white;padding:16px;box-shadow:0 8px 24px rgba(15,15,15,0.06)}
+    .muted{color:var(--muted)}
+    .controls .form-select{min-width:180px}
+    .overlay{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.18);z-index:9999;visibility:hidden;opacity:0;transition:160ms}
+    .overlay.show{visibility:visible;opacity:1}
+    .loader{background:white;padding:14px 18px;border-radius:10px;display:flex;gap:12px;align-items:center;box-shadow:0 8px 24px rgba(0,0,0,0.12)}
+    .spinner{width:36px;height:36px;border-radius:50%;border:4px solid #eee;border-top-color:var(--primary);animation:spin 1s linear infinite}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    .small-muted{font-size:0.9rem;color:#6c757d}
+  </style>
+</head>
+<body>
+
+  <div class="topbar d-flex justify-content-between align-items-center">
+    <div>
+      <h4 class="mb-0">Dynamic Maps — Monitoring</h4>
+      <small class="small-muted">Interactive timeseries & summary</small>
+    </div>
+    <div>
+      <a href="/admin/" class="btn btn-outline-light btn-sm">Admin</a>
+    </div>
+  </div>
+
+  <div class="container my-4">
+    <!-- controls -->
+    <div class="card-ui mb-3">
+      <form id="controls" class="row g-3 align-items-end">
+        <div class="col-auto">
+          <label class="form-label small-muted">Basin</label>
+          <select id="sel-basin" name="basin_id" class="form-select">
+            {% for b in basins %}
+            <option value="{{ b.basin_id }}" {% if b.basin_id == selected_basin %}selected{% endif %}>{{ b.basin_id }}{% if b.name %} — {{ b.name }}{% endif %}</option>
+            {% endfor %}
+          </select>
+        </div>
+
+        <div class="col-auto">
+          <label class="form-label small-muted">Data type</label>
+          <select id="sel-dtype" name="data_type" class="form-select">
+            {% for dt in dtypes %}
+            <option value="{{ dt.name }}" {% if dt.name == selected_dtype %}selected{% endif %}>{{ dt.name }}</option>
+            {% endfor %}
+          </select>
+        </div>
+
+        <div class="col-auto">
+          <label class="form-label small-muted d-block">Window</label>
+          <div class="form-check form-switch">
+            <input id="last24" class="form-check-input" type="checkbox" name="last24" value="1" {% if last24 %}checked{% endif %}>
+            <label class="form-check-label small-muted" for="last24">Last 24 hours</label>
+          </div>
+        </div>
+
+        <div class="col-auto" id="range_from_group" style="display:none">
+          <label class="form-label small-muted">From</label>
+          <input id="start_input" name="start" type="datetime-local" class="form-control">
+        </div>
+        <div class="col-auto" id="range_to_group" style="display:none">
+          <label class="form-label small-muted">To</label>
+          <input id="end_input" name="end" type="datetime-local" class="form-control">
+        </div>
+
+        <div class="col-auto">
+          <label class="form-label small-muted">Resolution</label>
+          <select id="sel-res" class="form-select">
+            <option value="auto">Auto (server decides)</option>
+            <option value="raw">Raw rows</option>
+            <option value="hourly">Hourly</option>
+            <option value="daily">Daily</option>
+          </select>
+        </div>
+
+        <div class="col-auto">
+          <button type="button" id="btn-load" class="btn btn-primary">Load</button>
+          <button type="button" id="btn-reset" class="btn btn-outline-secondary">Reset</button>
+        </div>
+
+        <div class="col-auto ms-auto text-end small-muted">
+          <div>Points shown: <strong id="meta-points">—</strong></div>
+          <div>Range: <strong id="meta-range">—</strong></div>
+        </div>
+      </form>
+    </div>
+
+    <!-- content -->
+    <div class="row g-4">
+      <div class="col-lg-8">
+        <div class="card-ui">
+          <div class="d-flex justify-content-between align-items-center mb-2">
+            <h5 id="chart-title" class="mb-0">{{ selected_dtype }} — Basin {{ selected_basin }}</h5>
+            <div>
+              <button id="btn-download" class="btn btn-outline-primary btn-sm">Download CSV</button>
+            </div>
+          </div>
+          <canvas id="chartCanvas" style="height:420px"></canvas>
+        </div>
+      </div>
+
+      <div class="col-lg-4">
+        <div class="card-ui">
+          <h6>Summary</h6>
+          <div class="mb-2"><small class="muted">Count</small> <div><strong id="sum-count">—</strong></div></div>
+          <div class="mb-2"><small class="muted">Sum</small> <div><strong id="sum-sum">—</strong></div></div>
+          <div class="mb-2"><small class="muted">Avg</small> <div><strong id="sum-avg">—</strong></div></div>
+          <div class="mb-2"><small class="muted">Min / Max</small> <div><strong id="sum-min">—</strong> / <strong id="sum-max">—</strong></div></div>
+          <hr>
+          <div class="small-muted">Large ranges are aggregated automatically to keep the UI responsive.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- overlay loader -->
+  <div class="overlay" id="overlay"><div class="loader"><div class="spinner"></div><div><strong id="overlay-msg">Loading…</strong><div class="small-muted" id="overlay-sub">Please wait.</div></div></div></div>
+
+  <!-- Chart.js + luxon adapter -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/luxon@3/build/global/luxon.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon@1"></script>
+
+  <script>
+  document.addEventListener('DOMContentLoaded', function () {
+    // DOM shortcuts
+    const overlay = document.getElementById('overlay');
+    const overlayMsg = document.getElementById('overlay-msg');
+    const overlaySub = document.getElementById('overlay-sub');
+
+    const selBasin = document.getElementById('sel-basin');
+    const selDtype = document.getElementById('sel-dtype');
+    const last24 = document.getElementById('last24');
+    const startInput = document.getElementById('start_input');
+    const endInput = document.getElementById('end_input');
+    const rangeFrom = document.getElementById('range_from_group');
+    const rangeTo = document.getElementById('range_to_group');
+    const selRes = document.getElementById('sel-res');
+    const btnLoad = document.getElementById('btn-load');
+    const btnReset = document.getElementById('btn-reset');
+    const metaPoints = document.getElementById('meta-points');
+    const metaRange = document.getElementById('meta-range');
+    const btnDownload = document.getElementById('btn-download');
+
+    function showOverlay(msg, sub) {
+      overlayMsg.textContent = msg || 'Loading…';
+      overlaySub.textContent = sub || 'Please wait.';
+      overlay.classList.add('show');
+    }
+    function hideOverlay() { overlay.classList.remove('show'); }
+
+    function toggleRangeInputs() {
+      if (last24.checked) {
+        rangeFrom.style.display = 'none';
+        rangeTo.style.display = 'none';
+      } else {
+        rangeFrom.style.display = 'block';
+        rangeTo.style.display = 'block';
+      }
+    }
+
+    function toDatetimeLocalString(d) {
+      const pad = (n) => String(n).padStart(2, '0');
+      return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    }
+
+    function initDefaultRange() {
+      const now = new Date();
+      const prev = new Date(now.getTime() - 24*3600*1000);
+      startInput.value = toDatetimeLocalString(prev);
+      endInput.value = toDatetimeLocalString(now);
+    }
+
+    // attach listeners
+    last24.addEventListener('change', function () {
+      toggleRangeInputs();
+    });
+
+    toggleRangeInputs();
+    initDefaultRange();
+
+    // Chart.js setup
+    const ctx = document.getElementById('chartCanvas').getContext('2d');
+    const chart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        datasets: [{
+          label: '',
+          data: [],
+          borderColor: 'rgba(13,110,253,1)',
+          backgroundColor: 'rgba(13,110,253,0.06)',
+          pointRadius: 2,
+          tension: 0.18,
+          fill: true
+        }]
+      },
+      options: {
+        scales: {
+          x: { type: 'time', time: { tooltipFormat: 'yyyy-MM-dd HH:mm', unit: 'hour' }, title: { display: true, text: 'Datetime' } },
+          y: { title: { display: true, text: 'Value' } }
+        },
+        plugins: { legend: { display: true } },
+        maintainAspectRatio: false
+      }
+    });
+
+    // Load data from API
+    async function loadData() {
+      const basin = selBasin.value;
+      const dtype = selDtype.value;
+      const resolution = selRes.value || 'auto';
+      let start = null, end = null;
+      if (!last24.checked) {
+        start = startInput.value || null;
+        end = endInput.value || null;
+      }
+
+      const params = new URLSearchParams();
+      params.set('basin_id', basin);
+      params.set('data_type', dtype);
+      if (start) params.set('start', start);
+      if (end) params.set('end', end);
+      if (resolution) params.set('resolution', resolution);
+
+      const url = `/monitoring/api/timeseries/?${params.toString()}`;
+
+      try {
+        showOverlay('Loading data…', 'Requesting timeseries from server');
+        console.log('Fetching', url);
+        const resp = await fetch(url, { method: 'GET', cache: 'no-cache' });
+        if (!resp.ok) {
+          // if server returns error (e.g., 413 for too large)
+          const text = await resp.text();
+          console.error('Server error', resp.status, text);
+          hideOverlay();
+          alert('Server returned error: ' + resp.status + ' — see console.');
+          return;
+        }
+        const payload = await resp.json();
+        if (!payload.ok) {
+          hideOverlay();
+          if (payload.error === 'raw_too_large') {
+            alert(payload.message);
+            return;
+          }
+          console.error('API error payload', payload);
+          alert('API error: ' + (payload.message || payload.error || 'unknown'));
+          return;
+        }
+
+        // populate chart
+        const pts = payload.points || [];
+        chart.data.datasets[0].data = pts.map(p => ({ x: p.x, y: p.y }));
+        chart.data.datasets[0].label = `${dtype} — Basin ${basin} (${payload.resolution})`;
+        chart.update();
+
+        // summary
+        const s = payload.summary || {};
+        document.getElementById('sum-count').textContent = s.count ?? '0';
+        document.getElementById('sum-sum').textContent = (s.sum != null ? Number(s.sum).toFixed(3) : '-');
+        document.getElementById('sum-avg').textContent = (s.avg != null ? Number(s.avg).toFixed(3) : '-');
+        document.getElementById('sum-min').textContent = (s.min != null ? Number(s.min).toFixed(3) : '-');
+        document.getElementById('sum-max').textContent = (s.max != null ? Number(s.max).toFixed(3) : '-');
+
+        // meta
+        metaPoints.textContent = (pts.length || 0);
+        metaRange.textContent = `${start || 'auto'} → ${end || 'auto'}`;
+
+        hideOverlay();
+      } catch (err) {
+        hideOverlay();
+        console.error('Failed loading timeseries', err);
+        alert('Failed to load timeseries: ' + (err.message || err));
+      }
+    }
+
+    // CSV download of currently plotted data
+    function downloadCSV() {
+      const data = chart.data.datasets[0].data || [];
+      if (!data.length) { alert('No data to download'); return; }
+      let csv = 'datetime,value\n';
+      for (let i=0;i<data.length;i++) {
+        csv += `"${(new Date(data[i].x)).toISOString()}",${data[i].y != null ? data[i].y : ''}\n`;
+      }
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a'); a.href = url;
+      a.download = `timeseries_basin_${selBasin.value}_${selDtype.value}.csv`;
+      document.body.appendChild(a); a.click(); a.remove();
+    }
+
+    // wire buttons
+    btnLoad.addEventListener('click', loadData);
+    btnReset.addEventListener('click', function () {
+      selRes.value = 'auto';
+      last24.checked = true;
+      toggleRangeInputs();
+      initDefaultRange();
+      loadData();
+    });
+    btnDownload.addEventListener('click', downloadCSV);
+
+    // initial load
+    loadData();
+  }); // DOMContentLoaded
+  </script>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
