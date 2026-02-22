@@ -277,8 +277,52 @@ pytest
 
 
 ## How to run (quick)
-1. Configure MySQL in `dynamic_maps/settings.py`.  
-2. Install dependencies and activate venv:
-   ```bash
-   pip install -r requirements.txt
 
+
+# Clone the repository
+git clone https://github.com/Vishnu-5757/dynamic-maps.git
+cd dynamic_maps
+
+# Create and activate a virtual environment
+python -m venv venv
+
+# Windows:
+venv\Scripts\activate
+# macOS/Linux:
+source venv/bin/activate
+
+# Install dependencies
+pip install -r requirements.txt
+
+
+1. Configure MySQL in `dynamic_maps/settings.py`.  
+Open dynamic_maps/settings.py and update the DATABASES section with your MySQL USER and PASSWORD.
+
+# Apply migrations to create tables and performance indexes
+python manage.py migrate
+
+# Create a superuser for the Admin Panel
+python manage.py createsuperuser
+
+# Create Data Types (Rainfall and Temperature)
+python manage.py shell -c "from monitoring.models import DataType; DataType.objects.get_or_create(name='Rainfall'); DataType.objects.get_or_create(name='Temperature')"
+
+# Ingest Temperature data
+python manage.py ingest_observations data/january_data_temp.csv --data-type Temperature
+
+# Ingest Rainfall data
+python manage.py ingest_observations data/january_data_rain.csv --data-type Rainfall
+
+5. Start the Application
+Bash
+python manage.py runserver
+
+Dashboard: http://127.0.0.1:8000/monitoring/dashboard/
+
+Admin: http://127.0.0.1:8000/admin/
+
+6. Run Automated Tests (Part F)
+To verify the API and aggregation logic:
+
+Bash
+pytest
