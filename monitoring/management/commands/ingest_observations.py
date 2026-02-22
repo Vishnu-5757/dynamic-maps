@@ -15,8 +15,7 @@ from django.db import connection, transaction
 from monitoring.models import Basin, DataType, Observation
 
 
-# CONFIG
-BATCH_SIZE = 2000  # tune this for your environment
+BATCH_SIZE = 2000  
 
 
 def make_file_source(path):
@@ -24,7 +23,7 @@ def make_file_source(path):
     filename = os.path.basename(path)
     h = hashlib.sha1()
     with open(path, "rb") as f:
-        chunk = f.read(1024 * 1024)  # read up to 1MB
+        chunk = f.read(1024 * 1024)  
         h.update(chunk)
     return f"{filename}::{h.hexdigest()[:12]}"
 
@@ -87,25 +86,23 @@ class Command(BaseCommand):
                 logger.error("DataType provided via --data-type not found: %s", data_type_arg)
                 raise CommandError(f"DataType not found: {data_type_arg}")
 
-        # Pre-load basin mapping (external basin identifier -> PK)
+        
         basin_map = {b.basin_id: b.id for b in Basin.objects.all()}
-        # We'll create new basins as we encounter them and update this map
-
-        # Resolve/validate file reading
+        
         total = 0
         ingested = 0
         skipped = 0
         errors = 0
 
-        # Prepare batch containers for SQL multi-row upsert
-        insert_rows = []  # list of tuples -> (basin_pk, data_type_pk, datetime_str, value_decimal_str, source_str)
+        
+        insert_rows = []  
 
-        # Helper: flush batch to DB using INSERT ... ON DUPLICATE KEY UPDATE
+        
         def flush_batch():
             nonlocal insert_rows, ingested, errors
             if not insert_rows:
                 return
-            # Build SQL with placeholders
+            
             values_sql_parts = []
             params = []
             for (basin_pk, data_type_pk, dt_str, val_str, source_str) in insert_rows:
@@ -124,12 +121,12 @@ class Command(BaseCommand):
                 ingested += len(insert_rows)
                 logger.info("Flushed batch of %d rows to DB", len(insert_rows))
             except Exception as e:
-                # If the batch fails, log and attempt fallback (per-row)
+                
                 logger.exception("Batch upsert failed: %s. Falling back to per-row upsert.", e)
-                # fallback per-row
+                
                 for (basin_pk, data_type_pk, dt_str, val_str, source_str) in insert_rows:
                     try:
-                        # Use ORM update_or_create as fallback
+                        
                         b_obj = Basin.objects.get(pk=basin_pk)
                         dt_obj = DataType.objects.get(pk=data_type_pk)
                         dt_parsed = _dt.datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=_dt.timezone.utc)
@@ -146,7 +143,7 @@ class Command(BaseCommand):
                         errors += 1
             insert_rows = []
 
-        # Open CSV and iterate
+        
         with open(csv_path, newline="", encoding="utf-8") as fh:
             sample = fh.read(8192)
             fh.seek(0)
@@ -162,7 +159,7 @@ class Command(BaseCommand):
 
             for row_index, raw_row in enumerate(reader, start=1):
                 total += 1
-                # Normalize row: lower-case keys, replace '.' with '_'
+                
                 row = {}
                 for orig_k, v in raw_row.items():
                     if orig_k is None:
@@ -170,7 +167,7 @@ class Command(BaseCommand):
                     nk = orig_k.strip().lower().replace(".", "_")
                     row[nk] = (v or "").strip()
 
-                # --- basin ---
+                
                 basin_key = "basin_id" if "basin_id" in row else ("basin" if "basin" in row else None)
                 if not basin_key:
                     logger.error("Row %d: missing basin column -> skipping", row_index)
@@ -184,7 +181,7 @@ class Command(BaseCommand):
                     errors += 1
                     continue
 
-                # --- data_type resolution ---
+                
                 dt_obj = None
                 if cli_data_type_obj:
                     dt_obj = cli_data_type_obj
@@ -209,7 +206,7 @@ class Command(BaseCommand):
                         if guess:
                             try:
                                 dt_obj = DataType.objects.get(name__iexact=guess)
-                                # only log initial inference; not per-row to reduce noise
+                                
                                 if total == 1:
                                     logger.info("Inferred data_type '%s' from filename", guess)
                             except DataType.DoesNotExist:
@@ -223,7 +220,7 @@ class Command(BaseCommand):
                             errors += 1
                             continue
 
-                # --- parse datetime ---
+                
                 dt_raw = row.get("datetime") or row.get("date") or row.get("datetime_utc") or ""
                 if not dt_raw:
                     logger.error("Row %d: missing datetime -> skipping", row_index)
@@ -235,13 +232,13 @@ class Command(BaseCommand):
                     if parsed is None:
                         raise ValueError("dateutil returned None")
                     if parsed.tzinfo is None:
-                        # treat naive timestamps as UTC (configurable)
+                        
                         if assume_tz_utc:
                             parsed = timezone.make_aware(parsed, timezone=_dt.timezone.utc)
                         else:
                             parsed = parsed.replace(tzinfo=_dt.timezone.utc)
                     parsed_utc = parsed.astimezone(_dt.timezone.utc)
-                    # MySQL datetime format (no timezone): store as 'YYYY-MM-DD HH:MM:SS'
+                    
                     dt_for_db = parsed_utc.strftime("%Y-%m-%d %H:%M:%S")
                 except Exception as e:
                     logger.error("Row %d: invalid datetime '%s' (%s) -> skipping", row_index, dt_raw, e)
@@ -249,7 +246,7 @@ class Command(BaseCommand):
                     errors += 1
                     continue
 
-                # --- parse value ---
+                
                 val_raw = row.get("value") or row.get("val") or ""
                 if val_raw == "":
                     logger.error("Row %d: missing value -> skipping", row_index)
@@ -258,7 +255,7 @@ class Command(BaseCommand):
                     continue
                 try:
                     val_dec = Decimal(val_raw)
-                    # convert to string for DB param (avoid Decimal->float issues)
+                    
                     val_str = format(val_dec, "f")
                 except (InvalidOperation, ValueError) as e:
                     logger.error("Row %d: non-numeric value '%s' -> skipping", row_index, val_raw)
@@ -266,10 +263,10 @@ class Command(BaseCommand):
                     errors += 1
                     continue
 
-                # --- basin PK resolution (cache & create if missing) ---
+                
                 basin_pk = basin_map.get(basin_val)
                 if basin_pk is None:
-                    # create new Basin row and add to map
+                    
                     try:
                         b_obj, created = Basin.objects.get_or_create(basin_id=basin_val)
                         basin_pk = b_obj.id
@@ -282,21 +279,19 @@ class Command(BaseCommand):
                         errors += 1
                         continue
 
-                # --- prepare row for batch insert ---
+               
                 insert_rows.append((basin_pk, dt_obj.id, dt_for_db, val_str, source_deterministic))
 
-                # flush if batch full
+                
                 if len(insert_rows) >= batch_size:
                     flush_batch()
-                    # progress log
+                    
                     logger.info("Processed %d rows", total)
 
-            # end for rows
-
-        # flush remaining rows
+            
         flush_batch()
 
-        # final summary
+        
         logger.info("Finished ingestion. total=%d ingested=%d skipped=%d errors=%d", total, ingested, skipped, errors)
         logger.info("Logfile: %s", logfile)
         self.stdout.write(self.style.SUCCESS(

@@ -90,22 +90,133 @@ dynamic_maps/
 
 2. Ensure `DataType` rows exist in DB (one-time):
 
-```bash
-python manage.py shell
->>> from monitoring.models import DataType
->>> DataType.objects.get_or_create(name='Rainfall')
->>> DataType.objects.get_or_create(name='Temperature')
->>> exit()
+--```bash
+-- python manage.py shell
+-- >>> from monitoring.models import DataType
+-- >>> DataType.objects.get_or_create(name='Rainfall')
+-- >>> DataType.objects.get_or_create(name='Temperature')
+-- >>> exit()
 
 
 
 # Temperature
-python manage.py ingest_observations data/january_data_temp.csv --data-type Temperature
+--- python manage.py ingest_observations data/january_data_temp.csv --data-type Temperature
 
 # Rainfall
-python manage.py ingest_observations data/january_data_rain.csv --data-type Rainfall
+--- python manage.py ingest_observations data/january_data_rain.csv --data-type Rainfall
 
 
+
+
+
+## Part C — Django REST API (DRF)
+
+Base path (all endpoints): `http://<host>:<port>/api/`  
+Example base: `http://127.0.0.1:8000/api/`
+
+---
+
+### Summary of resources
+- **Basins** — `/api/basins/` (CRUD + search + timeseries + upstream aggregation)
+- **Basin relations** — `/api/basin-relations/` (CRUD)
+- **Data types** — `/api/data-types/` (CRUD)
+- **Observations** — `/api/observations/` (CRUD + filtering + pagination + threshold search)
+
+---
+
+## 1) Basins
+
+POST /api/basins/
+
+curl -X POST http://127.0.0.1:8000/api/basins/ \
+  -H "Content-Type: application/json" \
+  -d '{"basin_id":"2046","name":"Example Basin","metadata":{"region":"north"}}'
+
+sample response (201)
+
+
+  {
+    "id": 677,
+    "basin_id": "20463",
+    "name": "Example Basin",
+    "metadata": {
+        "region": "north"
+    },
+    "created_at": "2026-02-21T11:22:49.019252Z",
+    "updated_at": "2026-02-21T11:22:49.019543Z"
+}
+
+
+GET /api/basins/{id}/
+PUT /api/basins/{id}/
+PATCH /api/basins/{id}/
+DELETE /api/basins/{id}/
+
+
+
+## 2) BasinRelations
+
+POST /api/basin-relations/
+
+curl -X POST http://127.0.0.1:8000/api/basin-relations/ \
+
+-H "Content-Type: application/json" \
+-d '{
+    "from_basin": 1,
+    "to_basin": 2,
+    "relation_type": "upstream_to_downstream",
+    "weight": 1.0
+}'
+
+
+GET /api/basin-relations/{id}/
+PUT /api/basin-relations/{id}/
+PATCH /api/basin-relations/{id}/
+DELETE /api/basin-relations/{id}/
+
+
+
+## 3. Data Types CRUD
+
+POST /api/data-types/
+
+
+curl -X POST http://127.0.0.1:8000/api/data-types/ \
+-H "Content-Type: application/json" \
+-d '{
+    "name": "Rainfall",
+    "description": "Hourly rainfall in mm"
+}'
+
+
+GET /api/data-types/{id}/
+PUT /api/data-types/{id}/
+PATCH /api/data-types/{id}/
+DELETE /api/data-types/{id}/
+
+
+## 4. Observation CRUD
+
+POST /api/observations/
+
+
+
+curl -X POST http://127.0.0.1:8000/api/observations/ \
+-H "Content-Type: application/json" \
+-d '{
+    "basin": 1,
+    "data_type": 1,
+    "datetime": "2019-01-01T01:00:00Z",
+    "value": 2.5,
+    "source": "manual"
+}'
+
+
+
+GET /api/observations/{id}/
+PUT /api/observations/{id}/
+PATCH /api/observations/{id}/
+DELETE /api/observations/{id}/
 
 
 
