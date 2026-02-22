@@ -13,7 +13,7 @@ TS_TTL = getattr(settings, "CACHE_TIMESERIES_TTL", 300)
 UP_TTL = getattr(settings, "CACHE_UPSTREAM_TTL", 300)
 
 def _normalize_iso(s):
-    # replace spaces with T and remove microseconds to keep keys stable
+    
     if not s:
         return "auto"
     return s.replace(" ", "T").split(".")[0]
@@ -28,7 +28,7 @@ def timeseries_key(basin_id: str, data_type: str, start_iso: str, end_iso: str, 
     s = _normalize_iso(start_iso)
     e = _normalize_iso(end_iso)
     key = f"timeseries:{basin_id}:{data_type}:{resolution}:{s}:{e}"
-    # keep key length reasonable (hash if very long)
+    
     if len(key) > 200:
         h = hashlib.sha1(key.encode()).hexdigest()[:16]
         return f"timeseries:hash:{h}"
@@ -54,7 +54,7 @@ def set_upstream_cache(basin_id, data_type, window, depth, payload, ttl=None):
     cache.set(key, payload, ttl or UP_TTL)
     return key
 
-# Invalidation helpers
+
 def invalidate_timeseries_for_basin(basin_id: str, data_type: str):
     """
     Conservative invalidation: delete common windows and use SCAN to remove keys that match prefix.
@@ -62,11 +62,11 @@ def invalidate_timeseries_for_basin(basin_id: str, data_type: str):
     """
     prefixes = [
         f"timeseries:{basin_id}:{data_type}:",
-        f"timeseries:{basin_id}:",  # broader
+        f"timeseries:{basin_id}:",  
     ]
     try:
         conn = get_redis_connection("default")
-        # use SCAN to find keys by pattern and delete them in batches
+        
         for prefix in prefixes:
             cursor = 0
             pattern = f"{prefix}*"
@@ -77,7 +77,7 @@ def invalidate_timeseries_for_basin(basin_id: str, data_type: str):
                 if cursor == 0:
                     break
     except Exception as e:
-        # fallback: try deleting a few likely keys (24h/48h/7d)
+        
         logger.exception("Redis SCAN delete failed, trying targeted deletes (%s)", e)
         for win in ("24h", "48h", "168h"):
             try:
@@ -94,9 +94,9 @@ def invalidate_upstream_for_impacted_downstream(basin_internal_id, get_downstrea
     try:
         downstream_list = get_downstream_fn(basin_internal_id) or []
         for dbid in downstream_list:
-            # delete a few likely upstream keys (common windows)
+            
             for w in ("24h", "48h", "168h"):
-                for dtype in ("Rainfall", "Temperature"):  # common dtypes
+                for dtype in ("Rainfall", "Temperature"):  
                     try:
                         cache.delete(upstream_key(dbid, dtype, w, 1))
                         cache.delete(upstream_key(dbid, dtype, w, 2))

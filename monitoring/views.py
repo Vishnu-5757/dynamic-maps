@@ -19,10 +19,9 @@ from monitoring import cache_utils
 
 logger = logging.getLogger(__name__)
 
-# Tunable settings (move to settings.py if you like)
-MAX_POINTS_INITIAL = getattr(settings, "DASHBOARD_MAX_POINTS_INITIAL", 800)   # server-side "fast" points
-MAX_RAW_POINTS = getattr(settings, "DASHBOARD_MAX_RAW_POINTS", 5000)         # raw rows allowed to return
-AGGREGATE_HOURLY_THRESHOLD = getattr(settings, "DASHBOARD_AGG_HOURLY_THRESHOLD", 2000)  # switch to hourly when > this
+MAX_POINTS_INITIAL = getattr(settings, "DASHBOARD_MAX_POINTS_INITIAL", 800)  
+MAX_RAW_POINTS = getattr(settings, "DASHBOARD_MAX_RAW_POINTS", 5000)         
+AGGREGATE_HOURLY_THRESHOLD = getattr(settings, "DASHBOARD_AGG_HOURLY_THRESHOLD", 2000)  
 
 def parse_datetime_local(value):
     """Parse HTML datetime-local like '2026-02-22T14:30' -> naive datetime or None"""
@@ -46,19 +45,18 @@ def dashboard_view(request):
     basins = list(Basin.objects.order_by("basin_id").all())
     dtypes = list(DataType.objects.order_by("name").all())
 
-    # defaults (first items if present)
+   
     selected_basin = request.GET.get("basin_id") or (basins[0].basin_id if basins else "")
     selected_dtype = request.GET.get("data_type") or (dtypes[0].name if dtypes else "")
     last24 = request.GET.get("last24", "1") in ("1", "true", "True", "on")
 
-    # For the template we only provide the UI; the actual timeseries and summary come from the API
+    
     context = {
         "basins": basins,
         "dtypes": dtypes,
         "selected_basin": selected_basin,
         "selected_dtype": selected_dtype,
         "last24": last24,
-        # expose some tuned defaults for client hints
         "MAX_POINTS_INITIAL": MAX_POINTS_INITIAL,
         "MAX_RAW_POINTS": MAX_RAW_POINTS,
         "AGGREGATE_HOURLY_THRESHOLD": AGGREGATE_HOURLY_THRESHOLD,
@@ -76,7 +74,7 @@ def timeseries_api(request):
     if not basin_id or not data_type:
         return HttpResponseBadRequest(json.dumps({"ok": False, "error": "basin_id and data_type required"}), content_type="application/json")
 
-    # parse date range
+    
     now = timezone.now()
     start_raw = request.GET.get("start")
     end_raw = request.GET.get("end")
@@ -120,14 +118,14 @@ def timeseries_api(request):
     except Exception:
         data_count = 0
 
-    # decide resolution if 'auto'
+    
     if resolution_for_key == "auto":
         if data_count > getattr(settings, "DASHBOARD_AGG_HOURLY_THRESHOLD", 2000):
             resolution_for_key = "hourly"
         else:
             resolution_for_key = "raw"
 
-    # replicate your earlier compute logic: build points list and summary
+    
     points = []
     dtype_lower = data_type.strip().lower()
     use_sum = dtype_lower == "rainfall" or "rain" in dtype_lower
@@ -142,14 +140,14 @@ def timeseries_api(request):
                 "data_count": data_count,
                 "resolution": "raw",
             }
-            # Do not cache this negative response for long; return immediately
+            
             return JsonResponse(payload, status=413)
         qs = base_qs.order_by("datetime").values_list("datetime", "value")
         for dt, val in qs:
             dt_iso = dt.isoformat() if hasattr(dt, "isoformat") else str(dt)
             points.append({"x": dt_iso, "y": float(val) if val is not None else None})
     else:
-        # aggregated path (hourly/daily) - use ORM Trunc funcs as before
+        
         if resolution_for_key == "hourly":
             trunc = TruncHour('datetime')
         else:
@@ -190,7 +188,7 @@ def timeseries_api(request):
         "summary": summary,
     }
 
-    # set cache
+    
     try:
         cache_utils.set_timeseries_cache(basin_id, data_type, start_iso, end_iso, resolution_for_key, payload)
     except Exception:

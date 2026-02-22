@@ -231,6 +231,49 @@ DELETE /api/observations/{id}/
 
 
 
+### Part D: Basic UI Dashboard
+
+The dashboard provides a centralized view for environmental data analysis.
+* **Interactive Filtering:** Toggle between Rainfall and Temperature for any Basin ID.
+* **Time Windows:** Support for custom ranges and a "Last 24 Hours" quick-toggle.
+* **Visual Analytics:** Responsive line charts powered by **Chart.js**.
+* **Live Summary:** Instant calculation of Min, Max, Mean, and Total values.
+
+
+
+Main Dashboard	/monitoring/dashboard/	      The primary interactive UI with line charts and data summary cards.
+Timeseries API	/monitoring/api/timeseries/	  Raw JSON endpoint (supports basin_id, data_type, start, and end parameters).
+Django Admin	/admin/	                      secure administrative panel to manage Basins, Relationships, and Observations.
+
+
+
+
+
+## ⚡ Performance & Caching (Part E)
+
+To ensure sub-second response times, the system implements a robust caching strategy using **Redis**.
+
+### 1. Caching Strategy
+* **Timeseries Cache:** Caches the result of API calls based on a unique key: `timeseries:{basin_id}:{data_type}:{resolution}:{start}:{end}`.
+* **Upstream Cache:** Caches recursive parent-child aggregations to avoid heavy database JOINs.
+* **TTL (Time-To-Live):** 300 seconds (5 minutes) default.
+
+
+
+
+
+
+## 🛠️ Testing & Quality (Part F)
+
+### 1. Database Optimization
+The `Observation` model is optimized with a **composite index** on `(basin, data_type, datetime)`. 
+* **Benefit:** Reduces query time from $O(n)$ to $O(\log n)$, allowing the dashboard to remain fast even with millions of observations.
+
+**Run tests:**
+bash
+pip install pytest pytest-django
+pytest
+
 
 
 ## How to run (quick)
