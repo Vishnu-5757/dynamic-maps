@@ -8,7 +8,7 @@ from rest_framework.decorators import action, api_view
 from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
 from django.shortcuts import get_object_or_404
-
+from monitoring import cache_utils
 from monitoring.models import Basin, BasinRelation, DataType, Observation
 from .serializers import (
     BasinSerializer,
@@ -65,76 +65,91 @@ class BasinViewSet(viewsets.ModelViewSet):
     def upstream_aggregate(self, request, pk=None):
         """
         GET /api/basins/{id}/upstream_aggregate?data_type=Rainfall&window=24h&depth=1
-        Returns aggregated sum for:
-          - basin itself
-          - upstream neighbors (1-hop minimum). If depth>1, multi-hop.
+        Uses Redis cache (via cache_utils). Cached payload is returned if available.
         """
         basin = self.get_object()
         data_type_name = request.query_params.get("data_type")
         window = request.query_params.get("window", "24h")
-        depth = int(request.query_params.get("depth", 1))  
-
-        if window.endswith("h"):
-            hours = int(window[:-1])
-        else:
-            hours = int(window)
-
-        cutoff = timezone.now() - timedelta(hours=hours)
+        depth = int(request.query_params.get("depth", 1))
 
         if not data_type_name:
             return Response({"detail": "data_type query param is required"}, status=400)
+
+        # try cache
+        cached = cache_utils.get_upstream_cache(basin.basin_id, data_type_name, window, depth)
+        if cached is not None:
+            return Response(cached)
+
+        # compute cutoff
+        if window.endswith("h"):
+            try:
+                hours = int(window[:-1])
+            except ValueError:
+                return Response({"detail": "invalid window format"}, status=400)
+        else:
+            try:
+                hours = int(window)
+            except ValueError:
+                return Response({"detail": "invalid window format"}, status=400)
+
+        cutoff = timezone.now() - timedelta(hours=hours)
+
         try:
             dt = DataType.objects.get(name__iexact=data_type_name)
         except DataType.DoesNotExist:
             return Response({"detail": "data_type not found"}, status=400)
 
-        
+        # BFS for upstream nodes (1-hop or multi-hop depending on depth)
         upstream_ids = set()
         queue = deque()
         visited = set()
 
-        
         queue.append((basin.id, 0))
         visited.add(basin.id)
 
         while queue:
             cur_id, cur_depth = queue.popleft()
             if cur_depth >= 1:
-                
                 upstream_ids.add(cur_id)
             if depth and cur_depth >= depth:
                 continue
-            
-            relations = BasinRelation.objects.filter(to_basin_id=cur_id)
+            relations = BasinRelation.objects.filter(to_basin_id=cur_id).only("from_basin_id")
             for rel in relations:
                 nid = rel.from_basin_id
                 if nid not in visited:
                     visited.add(nid)
                     queue.append((nid, cur_depth + 1))
 
-        
         basin_sum = (
             Observation.objects.filter(basin=basin, data_type=dt, datetime__gte=cutoff)
             .aggregate(total=Sum("value"))["total"]
             or Decimal("0")
         )
-        
-        upstream_sum = (
-            Observation.objects.filter(basin_id__in=upstream_ids, data_type=dt, datetime__gte=cutoff)
-            .aggregate(total=Sum("value"))["total"]
-            or Decimal("0")
-        )
 
-        return Response(
-            {
-                "basin_id": basin.basin_id,
-                "data_type": dt.name,
-                "window_hours": hours,
-                "basin_total": str(basin_sum),
-                "upstream_total": str(upstream_sum),
-                "upstream_count": len(upstream_ids),
-            }
-        )
+        upstream_sum = Decimal("0")
+        if upstream_ids:
+            upstream_sum = (
+                Observation.objects.filter(basin_id__in=upstream_ids, data_type=dt, datetime__gte=cutoff)
+                .aggregate(total=Sum("value"))["total"]
+                or Decimal("0")
+            )
+
+        payload = {
+            "basin_id": basin.basin_id,
+            "data_type": dt.name,
+            "window_hours": hours,
+            "basin_total": str(basin_sum),
+            "upstream_total": str(upstream_sum),
+            "upstream_count": len(upstream_ids),
+        }
+
+        
+        try:
+            cache_utils.set_upstream_cache(basin.basin_id, data_type_name, window, depth, payload)
+        except Exception:
+            logger.exception("Failed to set upstream cache for %s", basin.basin_id)
+
+        return Response(payload)
 
 
 

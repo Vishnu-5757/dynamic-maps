@@ -1,4 +1,3 @@
-# monitoring/views_dashboard.py
 import json
 import logging
 import math
@@ -15,6 +14,8 @@ from django.db.models import Sum, Avg, Min, Max, Count
 from django.db.models.functions import TruncHour, TruncDay
 
 from .models import Basin, DataType, Observation
+from monitoring import cache_utils
+
 
 logger = logging.getLogger(__name__)
 
@@ -67,128 +68,105 @@ def dashboard_view(request):
 
 def timeseries_api(request):
     """
-    API endpoint that returns timeseries (and a summary) for a basin + data_type + datetime range.
-
-    Query params:
-    - basin_id (required)
-    - data_type (required)
-    - start (ISO or datetime-local optional)  -> if missing, server will use last 24h
-    - end (optional)
-    - resolution: 'auto'|'raw'|'hourly'|'daily' (default 'auto')
-      - 'auto' picks raw if small else hourly
-    Response JSON:
-    {
-      "ok": true,
-      "data_count": <int>,
-      "resolution": "hourly",
-      "points": [{ "x": "<ISO datetime>", "y": <float|null> }, ...],
-      "summary": { "count":.., "sum":.., "avg":.., "min":.., "max":.. }
-    }
+    Cached timeseries API.
+    Query params: basin_id, data_type, start, end, resolution
     """
     basin_id = request.GET.get("basin_id")
     data_type = request.GET.get("data_type")
     if not basin_id or not data_type:
         return HttpResponseBadRequest(json.dumps({"ok": False, "error": "basin_id and data_type required"}), content_type="application/json")
 
-    # parse dates
-    tz = timezone.get_current_timezone()
+    # parse date range
     now = timezone.now()
     start_raw = request.GET.get("start")
     end_raw = request.GET.get("end")
     if not start_raw or not end_raw:
         end_dt = now
         start_dt = now - timedelta(hours=24)
+        start_iso = "auto"
+        end_iso = "auto"
     else:
         sp = parse_datetime_local(start_raw)
         ep = parse_datetime_local(end_raw)
         if not sp or not ep:
-            # fallback to last24 if parsing fails
             end_dt = now
             start_dt = now - timedelta(hours=24)
+            start_iso = "auto"
+            end_iso = "auto"
         else:
-            start_dt = timezone.make_aware(sp, tz) if timezone.is_naive(sp) else sp
-            end_dt = timezone.make_aware(ep, tz) if timezone.is_naive(ep) else ep
+            start_dt = timezone.make_aware(sp, timezone.get_current_timezone()) if timezone.is_naive(sp) else sp
+            end_dt = timezone.make_aware(ep, timezone.get_current_timezone()) if timezone.is_naive(ep) else ep
+            start_iso = start_dt.isoformat()
+            end_iso = end_dt.isoformat()
 
-    # base queryset
+    resolution = (request.GET.get("resolution") or "auto").lower()
+    
+    resolution_for_key = resolution
+
+    
+    cached = cache_utils.get_timeseries_cache(basin_id, data_type, start_iso, end_iso, resolution_for_key)
+    if cached is not None:
+        
+        return JsonResponse(cached)
+
     base_qs = Observation.objects.filter(
         basin__basin_id=basin_id,
         data_type__name__iexact=data_type,
         datetime__gte=start_dt,
         datetime__lte=end_dt,
     )
-
-    # count rows (fast on indexed datetime/basin)
     try:
         data_count = base_qs.count()
-    except Exception as e:
-        logger.exception("Failed to count observations: %s", e)
+    except Exception:
         data_count = 0
 
-    # choose resolution
-    resolution = (request.GET.get("resolution") or "auto").lower()
-    if resolution == "auto":
-        if data_count > AGGREGATE_HOURLY_THRESHOLD:
-            resolution = "hourly"
+    # decide resolution if 'auto'
+    if resolution_for_key == "auto":
+        if data_count > getattr(settings, "DASHBOARD_AGG_HOURLY_THRESHOLD", 2000):
+            resolution_for_key = "hourly"
         else:
-            resolution = "raw"
+            resolution_for_key = "raw"
 
+    # replicate your earlier compute logic: build points list and summary
     points = []
-    # choose aggregation function: for rainfall 'sum' makes sense; for temperature 'avg' better
     dtype_lower = data_type.strip().lower()
     use_sum = dtype_lower == "rainfall" or "rain" in dtype_lower
 
-    # handle 'raw' (but protect huge payloads)
-    if resolution == "raw":
-        if data_count > MAX_RAW_POINTS:
-            # too big to return raw — instruct client to choose hourly/daily
-            return JsonResponse({
+    if resolution_for_key == "raw":
+        MAX_RAW = getattr(settings, "DASHBOARD_MAX_RAW_POINTS", 5000)
+        if data_count > MAX_RAW:
+            payload = {
                 "ok": False,
                 "error": "raw_too_large",
-                "message": f"Raw data has {data_count} rows which is > {MAX_RAW_POINTS}. Request hourly or daily aggregation or narrow the date range.",
+                "message": f"Raw data has {data_count} rows which is > {MAX_RAW}. Request hourly/daily or narrower range.",
                 "data_count": data_count,
                 "resolution": "raw",
-            }, status=413)
-        # return raw rows
+            }
+            # Do not cache this negative response for long; return immediately
+            return JsonResponse(payload, status=413)
         qs = base_qs.order_by("datetime").values_list("datetime", "value")
         for dt, val in qs:
             dt_iso = dt.isoformat() if hasattr(dt, "isoformat") else str(dt)
-            y = float(val) if val is not None else None
-            points.append({"x": dt_iso, "y": y})
+            points.append({"x": dt_iso, "y": float(val) if val is not None else None})
     else:
-        # aggregated (hourly or daily)
-        if resolution == "hourly":
+        # aggregated path (hourly/daily) - use ORM Trunc funcs as before
+        if resolution_for_key == "hourly":
             trunc = TruncHour('datetime')
-        elif resolution == "daily":
-            trunc = TruncDay('datetime')
         else:
-            # fallback to hourly
-            trunc = TruncHour('datetime')
-
-        # annotate and aggregate at DB level
+            trunc = TruncDay('datetime')
         if use_sum:
             agg_qs = base_qs.annotate(period=trunc).values('period').annotate(value=Sum('value')).order_by('period')
         else:
             agg_qs = base_qs.annotate(period=trunc).values('period').annotate(value=Avg('value')).order_by('period')
-
         for row in agg_qs:
             period = row.get('period')
             val = row.get('value')
-            if period is None:
+            if not period:
                 continue
             dt_iso = period.isoformat() if hasattr(period, "isoformat") else str(period)
-            y = float(val) if val is not None else None
-            points.append({"x": dt_iso, "y": y})
+            points.append({"x": dt_iso, "y": float(val) if val is not None else None})
 
-    # summary aggregates (on raw values) computed at DB
-    # For rainfall we'll include sum; always return count,min,max,avg if available
-    agg_summary = base_qs.aggregate(
-        count=Count('pk'),
-        sum=Sum('value'),
-        avg=Avg('value'),
-        min=Min('value'),
-        max=Max('value'),
-    )
-    # convert Decimal -> float/string
+    agg_summary = base_qs.aggregate(count=Count('pk'), sum=Sum('value'), avg=Avg('value'), min=Min('value'), max=Max('value'))
     def conv(v):
         if v is None:
             return None
@@ -196,7 +174,6 @@ def timeseries_api(request):
             return float(v)
         except Exception:
             return str(v)
-
     summary = {
         "count": agg_summary.get('count') or 0,
         "sum": conv(agg_summary.get('sum')),
@@ -205,10 +182,18 @@ def timeseries_api(request):
         "max": conv(agg_summary.get('max')),
     }
 
-    return JsonResponse({
+    payload = {
         "ok": True,
         "data_count": data_count,
-        "resolution": resolution,
+        "resolution": resolution_for_key,
         "points": points,
         "summary": summary,
-    })
+    }
+
+    # set cache
+    try:
+        cache_utils.set_timeseries_cache(basin_id, data_type, start_iso, end_iso, resolution_for_key, payload)
+    except Exception:
+        logger.exception("Failed to set timeseries cache")
+
+    return JsonResponse(payload)

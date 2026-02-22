@@ -6,16 +6,16 @@ import logging
 from decimal import Decimal, InvalidOperation
 from datetime import datetime
 import datetime as _dt
-from dateutil import parser as dateparser  # pip install python-dateutil
+from dateutil import parser as dateparser  
 
 from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 from django.db import connection, transaction
 
-from monitoring.models import Basin, DataType, Observation
+from monitoring.models import Basin, DataType, Observation, BasinRelation
+from monitoring import cache_utils
 
-
-BATCH_SIZE = 2000  
+BATCH_SIZE = 2000
 
 
 def make_file_source(path):
@@ -23,7 +23,7 @@ def make_file_source(path):
     filename = os.path.basename(path)
     h = hashlib.sha1()
     with open(path, "rb") as f:
-        chunk = f.read(1024 * 1024)  
+        chunk = f.read(1024 * 1024)
         h.update(chunk)
     return f"{filename}::{h.hexdigest()[:12]}"
 
@@ -76,7 +76,7 @@ class Command(BaseCommand):
         source_deterministic = make_file_source(csv_path)
         logger.info("Deterministic source for this file: %s", source_deterministic)
 
-        # Resolve CLI DataType
+        
         cli_data_type_obj = None
         if data_type_arg:
             try:
@@ -89,31 +89,40 @@ class Command(BaseCommand):
         
         basin_map = {b.basin_id: b.id for b in Basin.objects.all()}
         
+        pk_to_external = {v: k for k, v in basin_map.items()}
+
         total = 0
         ingested = 0
         skipped = 0
         errors = 0
 
         
-        insert_rows = []  
+        insert_rows = []
 
-        
+        def _get_downstream_external_ids(basin_internal_id):
+            return list(BasinRelation.objects.filter(from_basin_id=basin_internal_id)
+                        .values_list("to_basin__basin_id", flat=True))
+
         def flush_batch():
             nonlocal insert_rows, ingested, errors
             if not insert_rows:
                 return
-            
+
+           
             values_sql_parts = []
             params = []
-            for (basin_pk, data_type_pk, dt_str, val_str, source_str) in insert_rows:
+            for (_basin_pk, _basin_external, _dt_pk, dt_str, val_str, source_str) in insert_rows:
                 values_sql_parts.append("(%s, %s, %s, %s, %s, NOW(), NOW())")
-                params.extend([basin_pk, data_type_pk, dt_str, val_str, source_str])
+                params.extend([_basin_pk, _dt_pk, dt_str, val_str, source_str])
             insert_sql = (
                 "INSERT INTO monitoring_observation "
                 "(basin_id, data_type_id, datetime, value, source, created_at, updated_at) VALUES "
                 + ",".join(values_sql_parts)
                 + " ON DUPLICATE KEY UPDATE value = VALUES(value), updated_at = NOW()"
             )
+
+            affected_external_set = set([r[1] for r in insert_rows if r[1]])
+
             try:
                 with transaction.atomic():
                     with connection.cursor() as cur:
@@ -121,14 +130,13 @@ class Command(BaseCommand):
                 ingested += len(insert_rows)
                 logger.info("Flushed batch of %d rows to DB", len(insert_rows))
             except Exception as e:
-                
                 logger.exception("Batch upsert failed: %s. Falling back to per-row upsert.", e)
                 
-                for (basin_pk, data_type_pk, dt_str, val_str, source_str) in insert_rows:
+                for (_basin_pk, _basin_external, _dt_pk, dt_str, val_str, source_str) in insert_rows:
                     try:
+                        b_obj = Basin.objects.get(pk=_basin_pk)
+                        dt_obj = DataType.objects.get(pk=_dt_pk)
                         
-                        b_obj = Basin.objects.get(pk=basin_pk)
-                        dt_obj = DataType.objects.get(pk=data_type_pk)
                         dt_parsed = _dt.datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=_dt.timezone.utc)
                         Observation.objects.update_or_create(
                             basin=b_obj,
@@ -141,9 +149,46 @@ class Command(BaseCommand):
                     except Exception as inner_e:
                         logger.exception("Fallback per-row upsert failed: %s", inner_e)
                         errors += 1
+
+            
+            if affected_external_set:
+                try:
+                    for ext_basin in affected_external_set:
+                        
+                        try:
+                            cache_utils.invalidate_timeseries_for_basin(ext_basin, "Rainfall")
+                        except Exception:
+                            logger.exception("invalidate timeseries (Rainfall) failed for %s", ext_basin)
+                        try:
+                            cache_utils.invalidate_timeseries_for_basin(ext_basin, "Temperature")
+                        except Exception:
+                            logger.exception("invalidate timeseries (Temperature) failed for %s", ext_basin)
+
+                        # invalidate upstream caches for impacted downstream basins
+                        try:
+                            cache_utils.invalidate_upstream_for_impacted_downstream(
+                                basin_internal_id=pk_for_external(ext_basin),
+                                get_downstream_fn=_get_downstream_external_ids
+                            )
+                        except Exception:
+                            logger.exception("invalidate upstream caches failed for ext basin %s", ext_basin)
+                except Exception:
+                    logger.exception("Batch cache invalidation failed")
+
             insert_rows = []
 
         
+        def pk_for_external(external_basin_id):
+            if external_basin_id in basin_map:
+                return basin_map[external_basin_id]
+            try:
+                b = Basin.objects.get(basin_id=external_basin_id)
+                basin_map[external_basin_id] = b.id
+                pk_to_external[b.id] = external_basin_id
+                return b.id
+            except Exception:
+                return None
+
         with open(csv_path, newline="", encoding="utf-8") as fh:
             sample = fh.read(8192)
             fh.seek(0)
@@ -159,7 +204,7 @@ class Command(BaseCommand):
 
             for row_index, raw_row in enumerate(reader, start=1):
                 total += 1
-                
+
                 row = {}
                 for orig_k, v in raw_row.items():
                     if orig_k is None:
@@ -206,7 +251,6 @@ class Command(BaseCommand):
                         if guess:
                             try:
                                 dt_obj = DataType.objects.get(name__iexact=guess)
-                                
                                 if total == 1:
                                     logger.info("Inferred data_type '%s' from filename", guess)
                             except DataType.DoesNotExist:
@@ -220,7 +264,7 @@ class Command(BaseCommand):
                             errors += 1
                             continue
 
-                
+               
                 dt_raw = row.get("datetime") or row.get("date") or row.get("datetime_utc") or ""
                 if not dt_raw:
                     logger.error("Row %d: missing datetime -> skipping", row_index)
@@ -232,13 +276,11 @@ class Command(BaseCommand):
                     if parsed is None:
                         raise ValueError("dateutil returned None")
                     if parsed.tzinfo is None:
-                        
                         if assume_tz_utc:
                             parsed = timezone.make_aware(parsed, timezone=_dt.timezone.utc)
                         else:
                             parsed = parsed.replace(tzinfo=_dt.timezone.utc)
                     parsed_utc = parsed.astimezone(_dt.timezone.utc)
-                    
                     dt_for_db = parsed_utc.strftime("%Y-%m-%d %H:%M:%S")
                 except Exception as e:
                     logger.error("Row %d: invalid datetime '%s' (%s) -> skipping", row_index, dt_raw, e)
@@ -246,7 +288,7 @@ class Command(BaseCommand):
                     errors += 1
                     continue
 
-                
+                # value parse
                 val_raw = row.get("value") or row.get("val") or ""
                 if val_raw == "":
                     logger.error("Row %d: missing value -> skipping", row_index)
@@ -255,7 +297,6 @@ class Command(BaseCommand):
                     continue
                 try:
                     val_dec = Decimal(val_raw)
-                    
                     val_str = format(val_dec, "f")
                 except (InvalidOperation, ValueError) as e:
                     logger.error("Row %d: non-numeric value '%s' -> skipping", row_index, val_raw)
@@ -266,11 +307,11 @@ class Command(BaseCommand):
                 
                 basin_pk = basin_map.get(basin_val)
                 if basin_pk is None:
-                    
                     try:
                         b_obj, created = Basin.objects.get_or_create(basin_id=basin_val)
                         basin_pk = b_obj.id
                         basin_map[basin_val] = basin_pk
+                        pk_to_external[basin_pk] = basin_val
                         if created:
                             logger.info("Row %d: created new Basin basin_id=%s (id=%d)", row_index, basin_val, basin_pk)
                     except Exception as e:
@@ -279,19 +320,17 @@ class Command(BaseCommand):
                         errors += 1
                         continue
 
-               
-                insert_rows.append((basin_pk, dt_obj.id, dt_for_db, val_str, source_deterministic))
+                basin_external = pk_to_external.get(basin_pk, basin_val)
+                insert_rows.append((basin_pk, basin_external, dt_obj.id, dt_for_db, val_str, source_deterministic))
 
-                
+                # flush when batch full
                 if len(insert_rows) >= batch_size:
                     flush_batch()
-                    
                     logger.info("Processed %d rows", total)
 
-            
+        # final flush
         flush_batch()
 
-        
         logger.info("Finished ingestion. total=%d ingested=%d skipped=%d errors=%d", total, ingested, skipped, errors)
         logger.info("Logfile: %s", logfile)
         self.stdout.write(self.style.SUCCESS(
